@@ -1,0 +1,123 @@
+trigger:
+  - none
+pool:
+  name: AWS-Agents
+parameters:
+  - name: AwsRegion
+    displayName: AWS Region
+    type: string
+    values:
+      - "eu-west-2"
+  - name: AppType
+    displayName: Server Type
+    type: string
+    values:
+      # - "Spread"
+      - "Application"
+  - name: PatchGroup
+    displayName: Patch Group
+    type: string
+    values:
+      - "1"
+      - "2"
+  - name: EnvironmentType
+    displayName: Environment Type
+    type: string
+    values:
+      - PPD
+      - PRL
+  - name: ServiceName
+    displayName: Envionment Name
+    type: string
+steps:
+  - task: AWSPowerShellModuleScript@1
+    inputs:
+      awsCredentials: 'AWS-Mode2DevOpsAdvanced-PPD'
+      regionName: "${{parameters.AwsRegion}}"
+      scriptType: 'inline'
+      inlineScript: |
+        function Get-CommandStatus {
+          param (
+          $CommandId
+          )
+          Write-Host "Getting command status" 
+          $InstanceId = "i-0d63da8751a9674c6"
+          $CommandDetails = Get-SSMCommandInvocation -CommandId $CommandId -Region $AwsRegion
+          $SuccessCount = 0
+          $OverallStatus = "NotFound"
+          $Response=@{}
+          for ($i = 0; $i -lt $CommandDetails.Length; $i++) {
+              $InstanceName = (($CommandDetails[$i].InstanceName) -split "\.")[0]
+              $Response[$InstanceName] = ($CommandDetails[$i].Status) 
+              if ($CommandDetails[$i].Status -eq "Success") {
+                  $SuccessCount++
+              } else {
+                  $OverallStatus = $CommandDetails[$i].Status 
+              }
+          }
+          if ($SuccessCount -eq $CommandDetails.Length) {
+              $OverallStatus = "Success"
+          }
+          $Response["OverallStatus"] = $OverallStatus
+          $SortedResponse = ($Response.GetEnumerator() | Sort-Object -Property "Name")
+          $SortedResponse | Out-String | Write-Host
+          Write-Output $SortedResponse
+        }
+        Write-Host "Starting Execution"
+        $AppType = "${{parameters.AppType}}"
+        $PatchGroup = "${{parameters.PatchGroup}}"
+        $AwsRegion = "${{parameters.AwsRegion}}"
+        $EnvironmentType = "${{parameters.EnvironmentType}}"
+        $EnvironmentName = "${{parameters.ServiceName}}"
+        Write-Host "Server Type: ${AppType}"
+        $MaxConcurrency = 100
+        
+        $DocumentName1 = "SuspendAutoScalingPolicies"
+        $DocumentName2 = "Restart-EC2Servers-By-PatchGroup"
+
+        $PatchGroupTarget = @{}
+        $CommandParameters = @{}
+
+        if ($AppType -eq "Application") {
+          $CommandParameters = @{
+            "EnvironmentType" = $EnvironmentType
+            "EnvironmentName" = $EnvironmentName }
+          $PatchGroupTarget = @{
+              "Key"    = "tag:Technical:PatchGroup"
+              "Values" = @($PatchGroup)
+            }
+          }
+
+
+        $CommandOutput = Send-SSMCommand -DocumentName $DocumentName1 -InstanceId $InstanceId -Parameter $CommandParameters -TimeoutSecond 300
+        $CommandId = $CommandOutput.CommandId
+        $CommandStatus = Get-CommandStatus -CommandId $CommandId
+        $OverallCommandStatus = $CommandStatus.OverallStatus
+
+        Start-Sleep 10
+
+        if ($AppType -eq "Application") {
+         $CommandParameters1 = @{
+            "PatchGroup" = $PatchGroup
+            "EnvironmentName" = $EnvironmentName }
+          $PatchGroupTarget = @{
+              "Key"    = "tag:Technical:PatchGroup"
+              "Values" = @($PatchGroup)
+            }
+          }
+
+        $CommandOutput = Send-SSMCommand -DocumentName $DocumentName2 -InstanceId $InstanceId -Parameter $CommandParameters1 -TimeoutSecond 300
+        $CommandId = $CommandOutput.CommandId
+        $CommandStatus = Get-CommandStatus -CommandId $CommandId
+        $OverallCommandStatus = $CommandStatus.OverallStatus
+        $TryAgainStatus = "Cancelling, Pending, InProgress, Delayed"
+        while ($TryAgainStatus.contains($OverallCommandStatus)) {
+          Start-Sleep 10
+          $CommandStatus = Get-CommandStatus -CommandId $CommandId
+          $OverallCommandStatus = $CommandStatus.OverallStatus
+          Write-Host "`n`n"
+          Write-Host "Hello World"
+        }
+        
+       # Write-Host "Command completed with status: ${OverallCommandStatus}`nCheck command history in Systems Manager for more details (Command ID: ${CommandId})."
+
